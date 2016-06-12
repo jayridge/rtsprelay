@@ -16,23 +16,22 @@ limitations.
 * gst-plugins-good-1.0
 * gst-plugins-bad-1.0
 
-( see https://gstreamer.freedesktop.org/modules/gst-rtsp-server.html )
+see https://gstreamer.freedesktop.org/modules/gst-rtsp-server.html
 
 ## build
 
-```make```
-
-This will create the binary `build/rtsprelay`
+To build simply type `make`. This will create the binary `build/rtsprelay`
 
 ## run
 
-`rtsprelay` accepts several arguments. Run with `-h` for details.
+The binary `rtsprelay` accepts several arguments. Run with `-h` for details.
 
 ## test
 
 To test you must create a RECORD session and one or more PLAY sessions.
 
 ### record
+
 
 ```
 gst-launch-1.0 videotestsrc is-live=1 ! vtenc_h264 max-keyframe-interval=30 realtime=1 allow-frame-reordering=0 !     video/x-h264,profile=baseline,width=640,height=480,framerate=10/1 ! queue ! rtspclientsink debug=0 latency=0 location=rtsp://127.0.0.1:8554/test/record
