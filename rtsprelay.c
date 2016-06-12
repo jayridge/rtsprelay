@@ -26,6 +26,18 @@ typedef struct
 } RelayCtx;
 
 
+static void
+relay_ctx_clear (RelayCtx *ctx)
+{
+    if (ctx) {
+        if (ctx->appsrc) {
+            gst_object_unref (ctx->appsrc);
+            ctx->appsrc = NULL;
+        }
+        ctx->buffers_relayed = 0;
+    }
+}
+
 static GstPadProbeReturn
 cb_have_data (GstPad          *pad,
               GstPadProbeInfo *info,
@@ -59,9 +71,7 @@ cb_have_data (GstPad          *pad,
         g_signal_emit_by_name (ctx->appsrc, "push-buffer", buffer2, &ret);
         if (ret != 0) {
             /* if we cannot push buffers let the bin die */
-            gst_object_unref (ctx->appsrc);
-            ctx->appsrc = NULL;
-            ctx->buffers_relayed = 0;
+            relay_ctx_clear (ctx);
         }
 
         gst_buffer_unmap (buffer, &map);
@@ -115,8 +125,8 @@ play_media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media,
     gst_util_set_object_arg (G_OBJECT (element), "format", "time");
 
     /* hold ref to appsrc, this  bin is shared across play requests */
+    relay_ctx_clear (ctx);
     ctx->appsrc = element;
-    ctx->buffers_relayed = 0;
 
     /* no longer need these refs */
     gst_object_unref (bin);
