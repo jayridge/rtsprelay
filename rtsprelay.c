@@ -1,10 +1,3 @@
-/*
- *
- * gst-launch-1.0 videotestsrc is-live=1 ! vtenc_h264 max-keyframe-interval=30 realtime=1 allow-frame-reordering=0 !     video/x-h264,profile=baseline,width=640,height=480,framerate=10/1 ! queue ! rtspclientsink debug=0 latency=0 location=rtsp://127.0.0.1:8554/test/record protocols=udp
- * GST_DEBUG=*:3 gst-launch-1.0 rtspsrc location="rtsp://localhost:8554/test" latency=50 debug=1 ! decodebin ! autovideosink
- * GST_DEBUG=*:4 gst-launch-1.0 rtspsrc location="rtsp://localhost:8554/test" latency=50 debug=1 protocols=tcp ! rtph264depay ! h264parse ! avdec_h264 ! autovideosink
- */
-
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -14,7 +7,7 @@
 #define DEFAULT_RTSP_PORT "8554"
 
 #define RECORD_BIN "( rtph264depay name=depay0 ! h264parse ! appsink name=recordsink )"
-#define PLAY_BIN "( appsrc name=appsrc is-live=1 do-timestamp=0 caps=\"video/x-h264, stream-format=(string)avc, alignment=(string)au, level=(string)3.1, profile=(string)constrained-baseline\" ! progressreport !" \
+#define PLAY_BIN "( appsrc name=appsrc is-live=1 do-timestamp=1 ! " \
                  "  rtph264pay pt=96 config-interval=5 name=pay0 )"
 
 static char *port = (char *) DEFAULT_RTSP_PORT;
@@ -46,30 +39,35 @@ cb_have_data (GstPad          *pad,
     GstFlowReturn ret;
     GstCaps *caps;
 
+    /* update play sink caps based on record sink */
     if (ctx->appsrc && ctx->buffers_relayed == 0) {
         caps = gst_pad_get_current_caps (pad);
-        fprintf(stderr, "****CAPS: %s\n", gst_caps_to_string (caps));
         g_object_set (G_OBJECT (ctx->appsrc), "caps",
-                      gst_caps_copy(caps), NULL);
-        gst_caps_unref(caps);
+                      gst_caps_copy (caps), NULL);
+        gst_caps_unref (caps);
     }
 
     buffer = GST_PAD_PROBE_INFO_BUFFER (info);
-    if (ctx->appsrc && gst_buffer_map (buffer, &map, GST_MAP_WRITE)) {
+    if (ctx->appsrc && gst_buffer_map (buffer, &map, GST_MAP_READ)) {
+        /* copy buffer */
         ptr = (guint16 *) map.data;
-        size = gst_buffer_get_size(buffer);
-        buffer2 = gst_buffer_new_allocate(NULL, size, NULL);
-        gst_buffer_fill(buffer2, 0, ptr, size);
+        size = gst_buffer_get_size (buffer);
+        buffer2 = gst_buffer_new_allocate (NULL, size, NULL);
+        gst_buffer_fill (buffer2, 0, ptr, size);
 
+        /* push buffer to play bin */
         g_signal_emit_by_name (ctx->appsrc, "push-buffer", buffer2, &ret);
         if (ret != 0) {
-            fprintf(stderr, "push-buffer %d\n", ret);
+            /* if we cannot push buffers let the bin die */
             gst_object_unref (ctx->appsrc);
             ctx->appsrc = NULL;
+            ctx->buffers_relayed = 0;
         }
+
         gst_buffer_unmap (buffer, &map);
         ctx->buffers_relayed++;
     }
+
     return GST_PAD_PROBE_OK;
 }
 
