@@ -4,8 +4,8 @@ TARGET = rtsprelay
 CFLAGS = -g -O2 --std=c99 -Wall
 LIBS =
 
-CFLAGS += `pkg-config --cflags gstreamer-rtsp-server-1.0`
-LDFLAGS += `pkg-config --libs gstreamer-rtsp-server-1.0`
+CFLAGS += `pkg-config --cflags gstreamer-1.0 gstreamer-plugins-base-1.0 gstreamer-rtsp-server-1.0`
+LDFLAGS += `pkg-config --libs gstreamer-1.0 gstreamer-plugins-base-1.0 gstreamer-rtsp-server-1.0`
 
 
 all: $(BLDDIR)/$(TARGET)
