@@ -25,7 +25,6 @@ static GOptionEntry entries[] = {
 
 typedef struct Relay {
 	GstRTSPServer *server;
-	/* using the word factory makes me feel ashamed */
 	GHashTable *factories;
 } Relay;
 

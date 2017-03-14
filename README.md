@@ -5,7 +5,7 @@ RTSPrelay relays a video stream provided by an RTSP RECORD session to one or
 more PLAY sessions. It is intended as a proof of concept and has several
 limitations.
 
-* Ony h.264 video and aac audio streams are supported.
+* Only h.264 video and aac audio streams are supported.
 * No authentication/authorization.
 
 ## dependencies
@@ -14,8 +14,6 @@ limitations.
 * gstreamer-1.0
 * gst-plugins-good-1.0
 * gst-plugins-bad-1.0
-
-see https://gstreamer.freedesktop.org/modules/gst-rtsp-server.html
 
 ## build
 
@@ -27,8 +25,10 @@ The binary `rtsprelay` accepts several arguments. Run with `-h` for details.
 
 ## test
 
-To test you must create a RECORD session and one or more PLAY sessions. You will need to update the
-rtsp location and encode/decode parameters for your environment.
+To test you must create a RECORD session and one or more PLAY sessions. The endpoint
+is dynamically created based on the first element in the uri path.
+
+You may need to update the rtsp location and encode/decode parameters for your environment.
 
 ### record
 
