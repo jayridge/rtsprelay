@@ -1,211 +1,310 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <gst/gst.h>
 #include <gst/rtsp-server/rtsp-server.h>
 
 #define DEFAULT_RTSP_PORT "8554"
 
-#define RECORD_BIN "( rtph264depay name=depay0 ! h264parse ! appsink name=recordsink )"
-#define PLAY_BIN "( appsrc name=appsrc is-live=1 do-timestamp=1 ! " \
-                 "  rtph264pay pt=96 config-interval=5 name=pay0 )"
+/* order matters here. first stream must be h264, second aac */
+#define RECORD_BIN "( rtph264depay name=depay0 ! fakesink " \
+                   "  rtpac3depay name=depay1 ! fakesink )"
+
+#define PLAY_BIN "( appsrc name=video_src is-live=1 do-timestamp=1 ! " \
+                 "  h264parse ! rtph264pay pt=96 config-interval=5 name=pay0 " \
+                 "  appsrc name=audio_src is-live=1 do-timestamp=1 ! " \
+                 "  ac3parse ! rtpac3pay pt=97 name=pay1 )"
 
 static char *port = (char *) DEFAULT_RTSP_PORT;
 
 static GOptionEntry entries[] = {
-    {"port", 'p', 0, G_OPTION_ARG_STRING, &port,
-     "Port to listen on (default: " DEFAULT_RTSP_PORT ")", "PORT"},
-    {NULL}
+	{"port", 'p', 0, G_OPTION_ARG_STRING, &port, "Listen port", "PORT"},
+	{NULL}
 };
 
-typedef struct
-{
-    GstClockTime timestamp;
-    GstElement   *appsrc;
-    int          buffers_relayed;
-} RelayCtx;
+typedef struct Relay {
+	GstRTSPServer *server;
+	GHashTable *factories;
+} Relay;
+
+typedef struct RelayInstance {
+	Relay *relay;
+	time_t started;
+	gchar *path;
+	gchar *play_path;
+	gchar *record_path;
+	GstElement *video_src;
+	GstElement *audio_src;
+	int video_buffers;
+	int audio_buffers;
+	int ref_count;
+} RelayInstance;
 
 
-static void
-relay_ctx_clear (RelayCtx *ctx)
+static void relay_instance_free(void *data)
 {
-    if (ctx) {
-        if (ctx->appsrc) {
-            gst_object_unref (ctx->appsrc);
-            ctx->appsrc = NULL;
-        }
-        ctx->buffers_relayed = 0;
-    }
+	RelayInstance *ri = (RelayInstance *)data;
+	GstRTSPMountPoints *mounts;
+
+	if (ri) {
+		printf("relay_instance_free\n");
+		if (ri->video_src) {
+			gst_object_unref(ri->video_src);
+		}
+		if (ri->audio_src) {
+			gst_object_unref(ri->audio_src);
+		}
+		mounts = gst_rtsp_server_get_mount_points(ri->relay->server);
+		gst_rtsp_mount_points_remove_factory(mounts, ri->record_path);
+		gst_rtsp_mount_points_remove_factory(mounts, ri->play_path);
+		g_object_unref(mounts);
+		g_free(ri->record_path);
+		g_free(ri->play_path);
+		free(ri);
+	}
 }
 
-static GstPadProbeReturn
-cb_have_data (GstPad          *pad,
-              GstPadProbeInfo *info,
-              gpointer         user_data)
+static GstFlowReturn push_buffer(GstElement *src, GstBuffer *buffer)
 {
-    RelayCtx *ctx = (RelayCtx *) user_data;
-    GstMapInfo map;
-    guint16 *ptr;
-    gsize size;
-    GstBuffer *buffer, *buffer2;
-    GstFlowReturn ret;
-    GstCaps *caps;
+	GstFlowReturn ret = GST_FLOW_NOT_LINKED;
+	GstBuffer *buffer2;
+	GstMapInfo map;
+	guint16 *ptr;
+	gsize size;
 
-    /* update play sink caps based on record sink */
-    if (ctx->appsrc && ctx->buffers_relayed == 0) {
-        caps = gst_pad_get_current_caps (pad);
-        g_object_set (G_OBJECT (ctx->appsrc), "caps",
-                      gst_caps_copy (caps), NULL);
-        gst_caps_unref (caps);
-    }
+	if (src && gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+		/* copy buffer */
+		ptr =(guint16 *) map.data;
+		size = gst_buffer_get_size(buffer);
+		buffer2 = gst_buffer_new_allocate(NULL, size, NULL);
+		gst_buffer_fill(buffer2, 0, ptr, size);
 
-    buffer = GST_PAD_PROBE_INFO_BUFFER (info);
-    if (ctx->appsrc && gst_buffer_map (buffer, &map, GST_MAP_READ)) {
-        /* copy buffer */
-        ptr = (guint16 *) map.data;
-        size = gst_buffer_get_size (buffer);
-        buffer2 = gst_buffer_new_allocate (NULL, size, NULL);
-        gst_buffer_fill (buffer2, 0, ptr, size);
-
-        /* push buffer to play bin */
-        g_signal_emit_by_name (ctx->appsrc, "push-buffer", buffer2, &ret);
-        if (ret != 0) {
-            /* if we cannot push buffers let the bin die */
-            relay_ctx_clear (ctx);
-        }
-
-        gst_buffer_unmap (buffer, &map);
-        ctx->buffers_relayed++;
-    }
-
-    return GST_PAD_PROBE_OK;
+		/* push buffer to play bin */
+		g_signal_emit_by_name(src, "push-buffer", buffer2, &ret);
+		//printf("push_buffer %d\n", ret);
+		gst_buffer_unmap(buffer, &map);
+	}
+	return ret;
 }
 
-static void
-record_media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media,
-                        gpointer user_data)
+static GstPadProbeReturn cb_have_video(GstPad *pad, GstPadProbeInfo *info, gpointer data)
 {
-    RelayCtx *ctx = (RelayCtx *) user_data;
-    GstElement *element, *bin;
-    GstPad *pad;
+	RelayInstance *ri = (RelayInstance *)data;
+	GstBuffer *buffer;
+	GstCaps *caps;
 
-    /* get the element used for providing the streams of the media */
-    bin = gst_rtsp_media_get_element (media);
+	if (ri->video_src) {
+		/* update play sink caps based on record sink */
+		if (ri->video_buffers == 0) {
+			caps = gst_pad_get_current_caps(pad);
+			gchar *capstr = gst_caps_to_string(caps);
+			printf("video: %s\n", capstr);
+			g_free(capstr);
+			g_object_set(G_OBJECT(ri->video_src), "caps",
+				     gst_caps_copy(caps), NULL);
+			gst_caps_unref(caps);
+		}
+		buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+		push_buffer(ri->video_src, buffer);
+		ri->video_buffers++;
+	}
+	return GST_PAD_PROBE_OK;
+}
 
-    /* get our appsink, we named it 'recordsink' with the name property */
-    element = gst_bin_get_by_name_recurse_up (GST_BIN (bin), "recordsink");
+static GstPadProbeReturn cb_have_audio(GstPad *pad, GstPadProbeInfo *info, gpointer data)
+{
+	RelayInstance *ri = (RelayInstance *)data;
+	GstBuffer *buffer;
+	GstCaps *caps;
 
-    /* get the sink pad */
-    pad = gst_element_get_static_pad (element, "sink");
+	/* update play sink caps based on record sink */
+	if (ri->audio_src) {
+		if (ri->audio_buffers == 0) {
+			caps = gst_pad_get_current_caps(pad);
+			gchar *capstr = gst_caps_to_string(caps);
+			printf("audio: %s\n", capstr);
+			g_free(capstr);
+			g_object_set(G_OBJECT(ri->audio_src), "caps",
+				     gst_caps_copy(caps), NULL);
+			gst_caps_unref(caps);
+		}
+		buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+		push_buffer(ri->audio_src, buffer);
+		ri->audio_buffers++;
+	}
+	return GST_PAD_PROBE_OK;
+}
 
-    /* set a buffer probe to drain the record bin */
-    gst_pad_add_probe (pad, GST_PAD_PROBE_TYPE_BUFFER,
-                       (GstPadProbeCallback) cb_have_data, ctx, NULL);
+static void record_media_configure(GstRTSPMediaFactory *factory, GstRTSPMedia *media, gpointer data)
+{
+	RelayInstance *ri = (RelayInstance *)data;
+	GstElement *element, *bin;
+	GstPad *pad;
 
-    /* no longer need these refs */
-    gst_object_unref (element);
-    gst_object_unref (bin);
+	bin = gst_rtsp_media_get_element(media);
+
+	element = gst_bin_get_by_name_recurse_up(GST_BIN(bin), "depay0");
+	pad = gst_element_get_static_pad(element, "src");
+	gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                          (GstPadProbeCallback)cb_have_video, ri, NULL);
+	gst_object_unref(pad);
+	gst_object_unref(element);
+
+	element = gst_bin_get_by_name_recurse_up(GST_BIN(bin), "depay1");
+	pad = gst_element_get_static_pad(element, "src");
+	gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER,
+                          (GstPadProbeCallback)cb_have_audio, ri, NULL);
+	gst_object_unref(pad);
+	gst_object_unref(element);
+
+	gst_object_unref(bin);
 }
 
 
-static void
-play_media_configure (GstRTSPMediaFactory * factory, GstRTSPMedia * media,
-                      gpointer user_data)
+static void play_media_configure(GstRTSPMediaFactory *factory, GstRTSPMedia *media, gpointer data)
 {
-    RelayCtx *ctx = (RelayCtx *) user_data;
-    GstElement *element, *bin;
+	RelayInstance *ri = (RelayInstance *)data;
+	GstElement *bin;
 
-    /* get the element used for providing the streams of the media */
-    bin = gst_rtsp_media_get_element (media);
-
-    /* get our appsrc, we named it 'appsrc' with the name property */
-    element = gst_bin_get_by_name_recurse_up (GST_BIN (bin), "appsrc");
-
-    /* set the format to time, appsrc will timestamp incoming buffers */
-    gst_util_set_object_arg (G_OBJECT (element), "format", "time");
-
-    /* hold ref to appsrc, this  bin is shared across play requests */
-    relay_ctx_clear (ctx);
-    ctx->appsrc = element;
-
-    /* no longer need these refs */
-    gst_object_unref (bin);
+	gst_rtsp_media_set_reusable(media, 1);
+	bin = gst_rtsp_media_get_element(media);
+	/* we have reusable media so only set this first time */
+	if (!ri->video_src) {
+		ri->video_src = gst_bin_get_by_name_recurse_up(GST_BIN(bin), "video_src");
+		ri->audio_src = gst_bin_get_by_name_recurse_up(GST_BIN(bin), "audio_src");
+		gst_util_set_object_arg(G_OBJECT(ri->video_src), "format", "time");
+		gst_util_set_object_arg(G_OBJECT(ri->audio_src), "format", "time");
+	}
+	gst_object_unref(bin);
 }
 
-int
-main (int argc, char *argv[])
+static RelayInstance * get_relay_instance(Relay *relay, gconstpointer path)
 {
-    GMainLoop *loop;
-    GstRTSPServer *server;
-    GstRTSPMountPoints *mounts;
-    GstRTSPMediaFactory *recordfactory, *playfactory;
-    GOptionContext *optctx;
-    GError *error = NULL;
-    RelayCtx *ctx;
+	return (RelayInstance *)g_hash_table_lookup(relay->factories, path);
+}
 
-    optctx = g_option_context_new ("RTSP Relay Server\n\n"
-        "See README for instructions ( https://github.com/jayridge/rtsprelay )\n\n");
+static void on_client_closed(GstRTSPClient *client, gpointer data)
+{
+	RelayInstance *ri = (RelayInstance *)data;
 
-    g_option_context_add_main_entries (optctx, entries, NULL);
-    g_option_context_add_group (optctx, gst_init_get_option_group ());
-    if (!g_option_context_parse (optctx, &argc, &argv, &error)) {
-        g_printerr ("Error parsing options: %s\n", error->message);
-        g_option_context_free (optctx);
-        g_clear_error (&error);
-        return -1;
-    }
-    g_option_context_free (optctx);
+	printf("on_client_closed\n");
+	if (--ri->ref_count <= 0) {
+		g_hash_table_remove(ri->relay->factories, ri->path);
+	}
+}
 
-    loop = g_main_loop_new (NULL, FALSE);
+/* inspiration: https://github.com/insonifi/gst-rtsp-dynsrv/blob/master/src/main.c */
+static void on_options(GstRTSPClient *client, GstRTSPContext *ctx, gpointer data)
+{
+	Relay *relay = (Relay *)data;
+	RelayInstance *ri;
+	GstRTSPMountPoints *mounts;
+	GstRTSPMediaFactory *factory;
+	gchar **pathv;
 
-    /* create a server instance */
-    server = gst_rtsp_server_new ();
-    g_object_set (server, "service", port, NULL);
+	if (!ctx->uri) {
+		fprintf(stderr, "on_options no url\n");
+		return;
+	}
 
-    /* get the mount points for this server, every server has a default object
-    * that be used to map uri mount points to media factories */
-    mounts = gst_rtsp_server_get_mount_points (server);
+	pathv = gst_rtsp_url_decode_path_components(ctx->uri);
+	if (!pathv || !pathv[1]) {
+		g_strfreev(pathv);
+		return;
+	}
 
-    /* make a record media factory for a test stream.
-    * any launch line works as long as it contains elements named pay%d. Each
-    * element with pay%d names will be a stream */
-    recordfactory = gst_rtsp_media_factory_new ();
-    gst_rtsp_media_factory_set_transport_mode (recordfactory,
-        GST_RTSP_TRANSPORT_MODE_RECORD);
-    gst_rtsp_media_factory_set_latency (recordfactory, 50);
-    gst_rtsp_media_factory_set_launch (recordfactory, RECORD_BIN);
+	ri = get_relay_instance(relay, pathv[1]);
+	if (!ri) {
+		printf("creating factories: %s\n", pathv[1]);
+		ri = malloc(sizeof(*ri));
+		memset(ri, 0, sizeof(*ri));
+		ri->relay = relay;
+		ri->path = strdup(pathv[1]);
+		ri->started = time(NULL);
+		g_hash_table_insert(relay->factories, ri->path, ri);
 
-    /* make a play media factory for a test stream. */
-    playfactory = gst_rtsp_media_factory_new ();
-    gst_rtsp_media_factory_set_shared(playfactory, TRUE);
-    gst_rtsp_media_factory_set_transport_mode (playfactory,
-        GST_RTSP_TRANSPORT_MODE_PLAY);
-    gst_rtsp_media_factory_set_latency (playfactory, 0);
-    gst_rtsp_media_factory_set_launch (playfactory, PLAY_BIN);
+		mounts = gst_rtsp_server_get_mount_points(relay->server);
 
-    /* notify when our media is ready, This is called whenever someone asks for
-     * the media and a new pipeline is created */
-    ctx = g_new0(RelayCtx, 1);
-    g_signal_connect (recordfactory, "media-configure",
-                      (GCallback) record_media_configure, ctx);
-    g_signal_connect (playfactory, "media-configure",
-                      (GCallback) play_media_configure, ctx);
+		ri->play_path = g_build_path("/", "/", pathv[1], NULL);
+		factory = gst_rtsp_media_factory_new();
+		gst_rtsp_media_factory_set_launch(factory, PLAY_BIN);
+		gst_rtsp_media_factory_set_shared(factory, TRUE);
+		gst_rtsp_mount_points_add_factory(mounts, ri->play_path, factory);
+		g_signal_connect(factory, "media-configure",
+	                         (GCallback)play_media_configure, ri);
 
-    /* attach the test factory to the /test url */
-    gst_rtsp_mount_points_add_factory (mounts, "/test/record", recordfactory);
-    gst_rtsp_mount_points_add_factory (mounts, "/test", playfactory);
+		ri->record_path = g_build_path("/", "/", pathv[1], "record", NULL);
+		factory = gst_rtsp_media_factory_new();
+		gst_rtsp_media_factory_set_latency(factory, 0);
+		gst_rtsp_media_factory_set_transport_mode(factory, GST_RTSP_TRANSPORT_MODE_RECORD);
+		gst_rtsp_media_factory_set_launch(factory, RECORD_BIN);
+		gst_rtsp_mount_points_add_factory(mounts, ri->record_path, factory);
+		g_signal_connect(factory, "media-configure",
+	                         (GCallback)record_media_configure, ri);
 
-    /* don't need the ref to the mapper anymore */
-    g_object_unref (mounts);
+		g_object_unref(mounts);
+	}
+	ri->ref_count++;
+	g_strfreev(pathv);
+	g_signal_connect(client, "closed", (GCallback)on_client_closed, ri);
+}
 
-    /* attach the server to the default maincontext */
-    gst_rtsp_server_attach (server, NULL);
+static void on_client_connect(GstRTSPServer *server, GstRTSPClient *client, gpointer data)
+{
+	printf("on_client_connect\n");
+	g_signal_connect(client, "options-request", (GCallback)on_options, data);
+}
 
-    /* start serving */
-    g_print ("stream ready at rtsp://127.0.0.1:%s\n", port);
-    g_main_loop_run (loop);
+static gboolean factory_equal(gconstpointer v1, gconstpointer v2)
+{
+	size_t l1 = strlen(v1);
+	size_t l2 = strlen(v2);
+	return strncmp(v1, v2, l1 ? l1 < l2 : l2) == 0;
+}
 
-    g_free(ctx);
+int main(int argc, char **argv)
+{
+	Relay *relay;
+	GMainLoop *loop;
+	GOptionContext *optctx;
+	GError *error = NULL;
 
-    return 0;
+	optctx = g_option_context_new("RTSP Relay\n\n");
+
+	g_option_context_add_main_entries(optctx, entries, NULL);
+	g_option_context_add_group(optctx, gst_init_get_option_group());
+	if (!g_option_context_parse(optctx, &argc, &argv, &error)) {
+		fprintf(stderr, "g_option_context_parse: %s\n", error->message);
+		g_option_context_free(optctx);
+		g_clear_error(&error);
+		return -1;
+	}
+	g_option_context_free(optctx);
+
+	loop = g_main_loop_new(NULL, FALSE);
+	relay = malloc(sizeof(*relay));
+	relay->factories = g_hash_table_new_full(g_str_hash, factory_equal,
+                                                 NULL, relay_instance_free);
+
+	/* create a server instance */
+	relay->server = gst_rtsp_server_new();
+	g_object_set(relay->server, "service", port, NULL);
+
+	/* attach server to main context */
+	gst_rtsp_server_attach(relay->server, NULL);
+
+	/* hook into client-connected to create on demand factories */
+	g_signal_connect(relay->server, "client-connected",
+                         (GCallback)on_client_connect, relay);
+
+	printf("listening at rtsp://0.0.0.0:%s\n", port);
+	g_main_loop_run(loop);
+	printf("exiting...\n");
+
+	g_hash_table_unref(relay->factories);
+	g_object_unref(relay->server);
+	free(relay);
+
+	return 0;
 }

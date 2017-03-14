@@ -5,9 +5,8 @@ RTSPrelay relays a video stream provided by an RTSP RECORD session to one or
 more PLAY sessions. It is intended as a proof of concept and has several
 limitations.
 
-* Only one RECORD session is supported.
-* Only h264 video is supported.
-
+* Only h.264 video and aac audio streams are supported.
+* No authentication/authorization.
 
 ## dependencies
 
@@ -15,8 +14,6 @@ limitations.
 * gstreamer-1.0
 * gst-plugins-good-1.0
 * gst-plugins-bad-1.0
-
-see https://gstreamer.freedesktop.org/modules/gst-rtsp-server.html
 
 ## build
 
@@ -28,39 +25,28 @@ The binary `rtsprelay` accepts several arguments. Run with `-h` for details.
 
 ## test
 
-To test you must create a RECORD session and one or more PLAY sessions. You will need to update the 
-rtsp location and encode/decode parameters for your environment.
+To test you must create a RECORD session and one or more PLAY sessions. The endpoint
+is dynamically created based on the first element in the uri path.
+
+You may need to update the rtsp location and encode/decode parameters for your environment.
 
 ### record
 
-A simple record pipeline.
+A record pipeline. Video must be the media element 0.
 
 ```
-gst-launch-1.0 videotestsrc is-live=1 ! openh264enc ! \
-video/x-h264,profile=baseline,width=640,height=480,framerate=10/1 ! queue ! \
-rtspclientsink debug=0 latency=0 location=rtsp://127.0.0.1:8554/test/record
-```
-
-The more complex OSX pipeline.
-
-```
-gst-launch-1.0 videotestsrc is-live=1 ! vtenc_h264 max-keyframe-interval=30 realtime=1 allow-frame-reordering=0 ! \
-video/x-h264,profile=baseline,width=640,height=480,framerate=10/1 ! queue ! \
-rtspclientsink debug=0 latency=0 location=rtsp://127.0.0.1:8554/test/record
+gst-launch-1.0 autoaudiosrc ! audioconvert ! avenc_ac3 ! \
+  r. autovideosrc is-live=1 ! queue ! \
+  x264enc tune=zerolatency byte-stream=true threads=1 key-int-max=15 intra-refresh=true ! \
+  video/x-h264,width=640,height=480,framerate=10/1 ! \
+  rtspclientsink debug=1 latency=0 location=rtsp://127.0.0.1:8554/test/record name=r
 ```
 
 ### play
 
-A simple generic play pipeline.
+A play pipeline.
 
 ```
-gst-launch-1.0 rtspsrc location="rtsp://127.0.0.1:8554/test" latency=50 debug=1 ! \
-decodebin ! autovideosink sync=0
-```
-
-A less simple OSX pipeline that works around some bugs with the vt decoder. This example also illustrates forcing a connection to use TCP.
-
-```
-gst-launch-1.0 rtspsrc location="rtsp://127.0.0.1:8554/test" latency=50 debug=1 protocols=tcp ! \
-rtph264depay ! h264parse ! avdec_h264 ! autovideosink sync=0
+gst-launch-1.0 -v rtspsrc debug=1 latency=0 location=rtsp://127.0.0.1:8554/test name=r r. ! \
+  decodebin ! videoconvert ! autovideosink r. ! decodebin ! audioconvert ! autoaudiosink
 ```
