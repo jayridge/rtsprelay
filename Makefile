@@ -1,7 +1,8 @@
 BLDDIR = build
 TARGET = rtsprelay
 
-CFLAGS = -g -O0 --std=c99 -Wall
+CFLAGS = -g -O1 --std=c99 -D_XOPEN_SOURCE=600
+CFLAGS += -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
 LIBS =
 
 PKGS = gstreamer-1.0 gstreamer-app-1.0 gstreamer-rtsp-1.0 gstreamer-rtsp-server-1.0
