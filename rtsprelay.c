@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <glib.h>
+#include <glib-unix.h>
 #include <gst/gst.h>
 #include <gst/rtsp-server/rtsp-server.h>
 
@@ -263,6 +265,16 @@ static gboolean factory_equal(gconstpointer v1, gconstpointer v2)
 	return strncmp(v1, v2, l1 ? l1 < l2 : l2) == 0;
 }
 
+gboolean exit_handler(gpointer data)
+{
+	GMainLoop *loop = data;
+	if (g_main_loop_is_running(loop)) {
+		printf("received signal - quitting event loop\n");
+		g_main_loop_quit(loop);
+	}
+	return G_SOURCE_CONTINUE;
+}
+
 int main(int argc, char **argv)
 {
 	Relay *relay;
@@ -297,6 +309,10 @@ int main(int argc, char **argv)
 	/* hook into client-connected to create on demand factories */
 	g_signal_connect(relay->server, "client-connected",
                          (GCallback)on_client_connect, relay);
+
+	/* unix signal handlers */
+	g_unix_signal_add(SIGINT, exit_handler, loop);
+	g_unix_signal_add(SIGTERM, exit_handler, loop);
 
 	printf("listening at rtsp://0.0.0.0:%s\n", port);
 	g_main_loop_run(loop);
