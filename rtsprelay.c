@@ -282,6 +282,9 @@ int main(int argc, char **argv)
 	GOptionContext *optctx;
 	GError *error = NULL;
 
+	// stdout line buffered even if not connected to terminal
+	setvbuf(stdout, NULL, _IOLBF, 0);
+
 	optctx = g_option_context_new("RTSP Relay\n\n");
 
 	g_option_context_add_main_entries(optctx, entries, NULL);
