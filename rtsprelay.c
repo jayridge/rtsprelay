@@ -9,14 +9,14 @@
 
 #define DEFAULT_RTSP_PORT "8554"
 
-/* order matters here. first stream must be h264, second aac */
+/* order matters here. first stream must be H264, second MP4A-LATM */
 #define RECORD_BIN "( rtph264depay name=depay0 ! fakesink " \
-                   "  rtpac3depay name=depay1 ! fakesink )"
+                   "  rtpmp4adepay name=depay1 ! fakesink )"
 
 #define PLAY_BIN "( appsrc name=video_src is-live=1 do-timestamp=1 ! " \
                  "  h264parse ! rtph264pay pt=96 config-interval=5 name=pay0 " \
                  "  appsrc name=audio_src is-live=1 do-timestamp=1 ! " \
-                 "  ac3parse ! rtpac3pay pt=97 name=pay1 )"
+                 "  aacparse ! rtpmp4apay pt=97 name=pay1 )"
 
 static char *port = (char *) DEFAULT_RTSP_PORT;
 
